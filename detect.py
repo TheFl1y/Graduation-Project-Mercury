@@ -8,12 +8,8 @@ from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
-from torch import tensor
-from gtts import gTTS
-from pygame import mixer
 import tempfile
 import threading
-import mysql.connector
 
 
 WARNING_DISTANCE_THRESHOLD = 100
@@ -39,6 +35,9 @@ KNOWN_WIDTHS = {
 Focal_length_found = 500
 
 def speak(sentence):
+    from gtts import gTTS
+    from pygame import mixer
+
     def _speak():
         with tempfile.NamedTemporaryFile(delete=True) as f:
             tts = gTTS(text=sentence, lang="zh")
@@ -54,32 +53,33 @@ def Distance_finder(Focal_Length, Known_width, obj_width_in_frame):
     return distance
 
 
-def calculate_distance(xyxy, known_widths, focal_length):
-    obj_width_in_frame = xyxy[2] - xyxy[0]
-    if obj_width_in_frame <= 0:
+def calculate_distance(xyxy, class_name, known_widths, focal_length):
+    known_width = known_widths.get(class_name)
+    obj_width_in_frame = float(xyxy[2] - xyxy[0])
+    if known_width is None or obj_width_in_frame <= 0:
         return None
+    return Distance_finder(focal_length, known_width, obj_width_in_frame)
 
-    min_distance = float("inf")
-    min_distance_label = None
-    for label, known_width in known_widths.items():
-        distance = Distance_finder(focal_length, known_width, obj_width_in_frame)
-        if distance < min_distance:
-            min_distance = distance
-            min_distance_label = label
 
-    return min_distance_label, min_distance
+def lookup_driving_licenses():
+    """Optional legacy database lookup; detection works without MySQL."""
+    import mysql.connector
 
-def select_tables(table_name):
-    sql = f"SELECT * FROM {table_name}"
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    return results
-
-def select_values(table_name, condition, condition_answer):
-    sql = f"SELECT * FROM {table_name} WHERE {condition} = '{condition_answer}'"
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    return results
+    connection = mysql.connector.connect(
+        host=os.getenv("MERCURY_DB_HOST", "127.0.0.1"),
+        user=os.getenv("MERCURY_DB_USER"),
+        password=os.getenv("MERCURY_DB_PASSWORD"),
+        database=os.getenv("MERCURY_DB_NAME", "mercury"),
+    )
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SELECT * FROM license")
+            return [row[0] for row in cursor.fetchall() if len(row) > 2 and row[2] == "駕駛中"]
+        finally:
+            cursor.close()
+    finally:
+        connection.close()
 
 
 
@@ -112,8 +112,6 @@ def run(weights=ROOT / 'runs/train/yolov5n-disstilled-finetuned/weights/best.pt'
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         ):
-    global cnx
-    global cursor
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -203,33 +201,18 @@ def run(weights=ROOT / 'runs/train/yolov5n-disstilled-finetuned/weights/best.pt'
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-                    distance_label, distance = calculate_distance(xyxy, KNOWN_WIDTHS, Focal_length_found)
-                    if distance_label is not None:
-                        print(f"Object: {names[int(cls)]}, Distance: {distance:.2f} cm")
+                    class_name = names[int(cls)]
+                    coordinates = [int(coord.item()) for coord in xyxy]
+                    print(f"Object: {class_name}, Coordinates: {coordinates}, Confidence: {float(conf):.2f}")
+                    distance = calculate_distance(xyxy, class_name, KNOWN_WIDTHS, Focal_length_found)
+                    if distance is not None:
+                        print(f"Estimated distance: {distance:.2f} cm (uncalibrated)")
+
+                    if os.getenv("MERCURY_DB_ENABLED") == "1":
                         try:
-                            cnx = mysql.connector.connect(host="127.0.0.1", user="root", password="", database="mercury")
-                            print("success")
-                        except:
-                            print("fail")
-
-                        # 建立游標
-                        cursor = cnx.cursor()
-
-                        license_results = select_tables("license")
-
-                        driving_number = []
-                        turn_or_not = []
-                        for license_row in license_results:
-                            turn_or_not.append(license_row[2])
-                            if (license_row[2] == "駕駛中"):
-                                driving_number.append(license_row[0])
-                        print(driving_number)
-                        print(turn_or_not)
-
-
-                        # if distance < WARNING_DISTANCE_THRESHOLD:  # 檢查物件是否進入警告範圍
-                        #     speak("範圍內有人車，請注意")
-                        #     time.sleep(3)
+                            print(f"Driving licenses: {lookup_driving_licenses()}")
+                        except Exception as exc:
+                            LOGGER.warning(f"Mercury database lookup failed: {exc}")
 
 
                     if save_txt:  # Write to file
@@ -244,10 +227,6 @@ def run(weights=ROOT / 'runs/train/yolov5n-disstilled-finetuned/weights/best.pt'
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
                             save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
-                    coordinates = [coord.item() for coord in [tensor(0., device='cuda:0'), tensor(95., device='cuda:0'),tensor(193., device='cuda:0'),tensor(463., device='cuda:0')]]
-                    confidence = 0.68
-
-                    print(f"Object: person, Coordinates: {coordinates}, Confidence: {confidence:.2f}")
 
             # Stream results
             im0 = annotator.result()

@@ -1,4 +1,7 @@
 # Repo-specific GitIgnore ----------------------------------------------------------------------------------------------
+VOCdevkit/
+yolov5_train.txt
+yolov5_val.txt
 *.jpg
 *.jpeg
 *.png
